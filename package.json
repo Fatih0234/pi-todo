@@ -1,0 +1,21 @@
+{
+  "name": "pi-todo",
+  "version": "1.0.0",
+  "description": "File-based todo manager for pi with GitHub issue integration",
+  "keywords": ["pi-package", "pi-extension", "todo", "task-manager", "github-issues"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/fatihkarahan/pi-todo.git"
+  },
+  "author": "fatihkarahan",
+  "pi": {
+    "extensions": ["./extensions"]
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-tui": "*",
+    "typebox": "*"
+  }
+}
