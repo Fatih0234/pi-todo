@@ -1311,6 +1311,73 @@ async function getGitHubRepoInfo(
 	}
 }
 
+const LABEL_COLORS: Record<string, string> = {
+	bug: "d73a4a",
+	enhancement: "a2eeef",
+	documentation: "0075ca",
+	"high-priority": "b60205",
+	concurrency: "5319e7",
+	qa: "d876e3",
+	refactor: "c5def5",
+	security: "ff7619",
+	performance: "fbca04",
+};
+const FALLBACK_COLORS = ["0e8a16", "1d76db", "b60205", "d93f0b", "5319e7", "0052cc", "84b6eb", "c2e0c6", "e6e6e6", "cc317c"];
+
+function getLabelColor(label: string): string {
+	const lower = label.toLowerCase();
+	if (LABEL_COLORS[lower]) return LABEL_COLORS[lower];
+	// Deterministic fallback based on hash of label name
+	let hash = 0;
+	for (let i = 0; i < label.length; i++) {
+		hash = (hash * 31 + label.charCodeAt(i)) & 0x7fffffff;
+	}
+	return FALLBACK_COLORS[hash % FALLBACK_COLORS.length];
+}
+
+function parseMissingLabels(stderr: string, allLabels: string[]): string[] {
+	const missing: string[] = [];
+	// gh error patterns: "Label 'bug' not found", "Label \"bug\" doesn't exist"
+	const patterns = [
+		/Label\s+['"]([^'"]+)['"]\s+(?:not found|doesn't exist|does not exist)/gi,
+		/Label\s+['"]([^'"]+)['"]\s+not found in repository/gi,
+	];
+	for (const pattern of patterns) {
+		let m: RegExpExecArray | null;
+		while ((m = pattern.exec(stderr)) !== null) {
+			const name = m[1];
+			if (name && !missing.includes(name)) missing.push(name);
+		}
+	}
+	// If we couldn't parse, conservatively assume all labels might be missing
+	if (missing.length === 0 && stderr.includes("label") && (stderr.includes("not found") || stderr.includes("doesn't exist") || stderr.includes("does not exist"))) {
+		return [...allLabels];
+	}
+	return missing;
+}
+
+async function ensureGitHubLabels(cwd: string, labels: string[]): Promise<{ ok: true } | { error: string }> {
+	try {
+		for (const label of labels) {
+			const trimmed = label.trim();
+			if (!trimmed) continue;
+			const color = getLabelColor(trimmed);
+			const result = await execGh(["label", "create", trimmed, "--color", color], cwd, 8000);
+			if (result.exitCode !== 0) {
+				const stderr = result.stderr || "";
+				// Label already exists is fine
+				if (stderr.includes("already exists")) continue;
+				if (stderr.includes("HTTP 422") && stderr.includes("already_exists")) continue;
+				return { error: `Failed to create label "${trimmed}": ${stderr || result.stdout || "unknown error"}` };
+			}
+		}
+		return { ok: true };
+	} catch (e) {
+		const msg = e instanceof Error ? e.message : String(e);
+		return { error: `Failed to create labels: ${msg}` };
+	}
+}
+
 async function createGitHubIssue(
 	cwd: string,
 	title: string,
@@ -1331,14 +1398,19 @@ async function createGitHubIssue(
 
 		let result = await execGh(args, cwd, 15000);
 
-		// If labels don't exist on the repo, gh errors. Retry without labels.
+		// If labels don't exist on the repo, create them and retry.
 		if (result.exitCode !== 0 && labels.length > 0) {
 			const stderr = result.stderr || "";
 			if (stderr.includes("label") && (stderr.includes("not found") || stderr.includes("doesn't exist") || stderr.includes("does not exist"))) {
-				const argsNoLabels = ["issue", "create", "--title", issueTitle];
-				if (body.trim()) argsNoLabels.push("--body", body.trim());
-				else argsNoLabels.push("--body", "");
-				result = await execGh(argsNoLabels, cwd, 15000);
+				const missing = parseMissingLabels(stderr, labels);
+				if (missing.length > 0) {
+					const ensured = await ensureGitHubLabels(cwd, missing);
+					if ("error" in ensured) {
+						return { error: ensured.error };
+					}
+					// Retry issue creation with all labels now that they exist
+					result = await execGh(args, cwd, 15000);
+				}
 			}
 		}
 
