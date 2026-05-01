@@ -7,7 +7,7 @@ A file-based todo manager for [pi](https://pi.dev), with optional **GitHub issue
 - **File-based storage** — Each todo is a standalone markdown file under `.pi/todos/`
 - **Visual manager** — `/todos` command with fuzzy search, keyboard shortcuts, and a detail overlay
 - **Session-safe** — Todos are tracked per working directory, so switching projects keeps them separate
-- **GitHub issue export** — Convert any todo into a GitHub issue directly from the detail view or action menu
+- **GitHub issue export** — Convert any todo into a GitHub issue directly from the detail view or action menu. Todo tags are automatically mapped to GitHub labels (missing labels are auto-created)
 - **Lock-based editing** — Prevents conflicts when multiple sessions edit the same todo
 
 ## Install
@@ -66,7 +66,7 @@ Requirements:
 - Authenticated (`gh auth login`)
 - Inside a git repository with a GitHub remote
 
-The issue title and body are taken directly from the todo. The issue URL is copied to your clipboard on success.
+The issue title and body are taken directly from the todo. **Todo tags are automatically mapped to GitHub labels** — if a label doesn't exist on the repo, it is auto-created with a sensible color. The issue URL is copied to your clipboard on success.
 
 ## Todo file format
 
