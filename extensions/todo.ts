@@ -108,6 +108,7 @@ const TodoParams = Type.Object({
 		"delete",
 		"claim",
 		"release",
+		"github_issue",
 	] as const),
 	id: Type.Optional(
 		Type.String({ description: "Todo id (TODO-<hex> or raw hex filename)" }),
@@ -130,7 +131,8 @@ type TodoAction =
 	| "append"
 	| "delete"
 	| "claim"
-	| "release";
+	| "release"
+	| "github_issue";
 
 type TodoOverlayAction = "back" | "work" | "refine" | "close" | "delete" | "githubIssue";
 
@@ -1313,6 +1315,7 @@ async function createGitHubIssue(
 	cwd: string,
 	title: string,
 	body: string,
+	labels: string[] = [],
 ): Promise<{ url: string; number: number } | { error: string }> {
 	try {
 		const issueTitle = title.trim() || "Untitled todo";
@@ -1322,7 +1325,23 @@ async function createGitHubIssue(
 		} else {
 			args.push("--body", "");
 		}
-		const result = await execGh(args, cwd, 15000);
+		for (const label of labels) {
+			if (label.trim()) args.push("--label", label.trim());
+		}
+
+		let result = await execGh(args, cwd, 15000);
+
+		// If labels don't exist on the repo, gh errors. Retry without labels.
+		if (result.exitCode !== 0 && labels.length > 0) {
+			const stderr = result.stderr || "";
+			if (stderr.includes("label") && (stderr.includes("not found") || stderr.includes("doesn't exist") || stderr.includes("does not exist"))) {
+				const argsNoLabels = ["issue", "create", "--title", issueTitle];
+				if (body.trim()) argsNoLabels.push("--body", body.trim());
+				else argsNoLabels.push("--body", "");
+				result = await execGh(argsNoLabels, cwd, 15000);
+			}
+		}
+
 		if (result.exitCode !== 0) {
 			const stderr = result.stderr || "";
 			if (stderr.includes("authentication") || stderr.includes("authorize") || stderr.includes("401")) {
@@ -1665,10 +1684,17 @@ export default function todosExtension(pi: ExtensionAPI) {
 		name: "todo",
 		label: "Todo",
 		description:
-			`Manage file-based todos in ${todosDirLabel} (list, list-all, get, create, update, append, delete, claim, release). ` +
+			`Manage file-based todos in ${todosDirLabel} (list, list-all, get, create, update, append, delete, claim, release, github_issue). ` +
 			"Title is the short summary; body is long-form markdown notes (update replaces, append adds). " +
 			"Todo ids are shown as TODO-<hex>; id parameters accept TODO-<hex> or the raw hex filename. " +
-			"Claim tasks before working on them to avoid conflicts, and close them when complete.", 
+			"Claim tasks before working on them to avoid conflicts, and close them when complete. " +
+			"github_issue converts a todo to a GitHub issue (requires `gh` CLI, auth, and a GitHub remote).",
+		promptSnippet: "Create, update, list, and manage todos. Convert todos to GitHub issues.",
+		promptGuidelines: [
+			"Use the todo tool to track tasks, bugs, and feature requests.",
+			"Use github_issue action to convert a completed or refined todo into a GitHub issue.",
+			"Todo tags are automatically mapped to GitHub labels when creating an issue.",
+		], 
 		parameters: TodoParams,
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -1943,6 +1969,54 @@ export default function todosExtension(pi: ExtensionAPI) {
 						details: { action: "delete", todo: result as TodoRecord },
 					};
 				}
+
+				case "github_issue": {
+					if (!params.id) {
+						return {
+							content: [{ type: "text", text: "Error: id required" }],
+							details: { action: "github_issue", error: "id required" },
+						};
+					}
+					const validated = validateTodoId(params.id);
+					if ("error" in validated) {
+						return {
+							content: [{ type: "text", text: validated.error }],
+							details: { action: "github_issue", error: validated.error },
+						};
+					}
+					const normalizedId = validated.id;
+					const displayId = formatTodoId(normalizedId);
+					const filePath = getTodoPath(todosDir, normalizedId);
+					const record = await ensureTodoExists(filePath, normalizedId);
+					if (!record) {
+						return {
+							content: [{ type: "text", text: `Todo ${displayId} not found` }],
+							details: { action: "github_issue", error: "not found" },
+						};
+					}
+					const repo = await getGitHubRepoInfo(ctx.cwd);
+					if ("error" in repo) {
+						return {
+							content: [{ type: "text", text: repo.error }],
+							details: { action: "github_issue", error: repo.error },
+						};
+					}
+					const issue = await createGitHubIssue(ctx.cwd, record.title, record.body, record.tags);
+					if ("error" in issue) {
+						return {
+							content: [{ type: "text", text: issue.error }],
+							details: { action: "github_issue", error: issue.error },
+						};
+					}
+					// Append issue URL to todo body for tracking
+					const spacer = record.body.trim().length ? "\n\n" : "";
+					record.body = `${record.body.replace(/\s+$/, "")}${spacer}[GitHub issue #${issue.number}](${issue.url})\n`;
+					await writeTodoFile(filePath, record);
+					return {
+						content: [{ type: "text", text: `Created GitHub issue #${issue.number}: ${issue.url}` }],
+						details: { action: "github_issue", todo: record, issueUrl: issue.url, issueNumber: issue.number },
+					};
+				}
 			}
 		},
 
@@ -2006,7 +2080,9 @@ export default function todosExtension(pi: ExtensionAPI) {
 									? "Claimed"
 									: details.action === "release"
 										? "Released"
-										: null;
+										: details.action === "github_issue"
+											? "GitHub issue created from"
+											: null;
 			if (actionLabel) {
 				const lines = text.split("\n");
 				lines[0] = theme.fg("success", "✓ ") + theme.fg("muted", `${actionLabel} `) + lines[0];
@@ -2163,11 +2239,16 @@ export default function todosExtension(pi: ExtensionAPI) {
 							ctx.ui.notify(repo.error, "error");
 							return "stay";
 						}
-						const issue = await createGitHubIssue(ctx.cwd, record.title, record.body);
+						const issue = await createGitHubIssue(ctx.cwd, record.title, record.body, record.tags);
 						if ("error" in issue) {
 							ctx.ui.notify(issue.error, "error");
 							return "stay";
 						}
+						// Append issue URL to todo body for tracking
+						const filePath = getTodoPath(todosDir, record.id);
+						const spacer = record.body.trim().length ? "\n\n" : "";
+						record.body = `${record.body.replace(/\s+$/, "")}${spacer}[GitHub issue #${issue.number}](${issue.url})\n`;
+						await writeTodoFile(filePath, record);
 						ctx.ui.notify(`Created GitHub issue #${issue.number}: ${issue.url}`, "success");
 						try {
 							copyToClipboard(issue.url);
