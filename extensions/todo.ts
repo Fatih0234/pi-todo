@@ -2059,31 +2059,35 @@ export default function todosExtension(pi: ExtensionAPI) {
 					const normalizedId = validated.id;
 					const displayId = formatTodoId(normalizedId);
 					const filePath = getTodoPath(todosDir, normalizedId);
-					const record = await ensureTodoExists(filePath, normalizedId);
-					if (!record) {
+
+					const lockResult = await withTodoLock(todosDir, normalizedId, ctx, async () => {
+						const record = await ensureTodoExists(filePath, normalizedId);
+						if (!record) {
+							return { error: `Todo ${displayId} not found` } as const;
+						}
+						const repo = await getGitHubRepoInfo(ctx.cwd);
+						if ("error" in repo) {
+							return { error: repo.error } as const;
+						}
+						const issue = await createGitHubIssue(ctx.cwd, record.title, record.body, record.tags);
+						if ("error" in issue) {
+							return { error: issue.error } as const;
+						}
+						// Append issue URL to todo body for tracking
+						const spacer = record.body.trim().length ? "\n\n" : "";
+						record.body = `${record.body.replace(/\s+$/, "")}${spacer}[GitHub issue #${issue.number}](${issue.url})\n`;
+						await writeTodoFile(filePath, record);
+						return { record, issue } as const;
+					});
+
+					if (typeof lockResult === "object" && "error" in lockResult) {
 						return {
-							content: [{ type: "text", text: `Todo ${displayId} not found` }],
-							details: { action: "github_issue", error: "not found" },
+							content: [{ type: "text", text: lockResult.error }],
+							details: { action: "github_issue", error: lockResult.error },
 						};
 					}
-					const repo = await getGitHubRepoInfo(ctx.cwd);
-					if ("error" in repo) {
-						return {
-							content: [{ type: "text", text: repo.error }],
-							details: { action: "github_issue", error: repo.error },
-						};
-					}
-					const issue = await createGitHubIssue(ctx.cwd, record.title, record.body, record.tags);
-					if ("error" in issue) {
-						return {
-							content: [{ type: "text", text: issue.error }],
-							details: { action: "github_issue", error: issue.error },
-						};
-					}
-					// Append issue URL to todo body for tracking
-					const spacer = record.body.trim().length ? "\n\n" : "";
-					record.body = `${record.body.replace(/\s+$/, "")}${spacer}[GitHub issue #${issue.number}](${issue.url})\n`;
-					await writeTodoFile(filePath, record);
+
+					const { record, issue } = lockResult;
 					return {
 						content: [{ type: "text", text: `Created GitHub issue #${issue.number}: ${issue.url}` }],
 						details: { action: "github_issue", todo: record, issueUrl: issue.url, issueNumber: issue.number },
@@ -2306,24 +2310,35 @@ export default function todosExtension(pi: ExtensionAPI) {
 						return "stay";
 					}
 					if (action === "githubIssue") {
-						const repo = await getGitHubRepoInfo(ctx.cwd);
-						if ("error" in repo) {
-							ctx.ui.notify(repo.error, "error");
-							return "stay";
-						}
-						const issue = await createGitHubIssue(ctx.cwd, record.title, record.body, record.tags);
-						if ("error" in issue) {
-							ctx.ui.notify(issue.error, "error");
-							return "stay";
-						}
-						// Append issue URL to todo body for tracking
 						const filePath = getTodoPath(todosDir, record.id);
-						const spacer = record.body.trim().length ? "\n\n" : "";
-						record.body = `${record.body.replace(/\s+$/, "")}${spacer}[GitHub issue #${issue.number}](${issue.url})\n`;
-						await writeTodoFile(filePath, record);
-						ctx.ui.notify(`Created GitHub issue #${issue.number}: ${issue.url}`, "success");
+						const lockResult = await withTodoLock(todosDir, record.id, ctx, async () => {
+							const freshRecord = await ensureTodoExists(filePath, record.id);
+							if (!freshRecord) {
+								return { error: `Todo ${formatTodoId(record.id)} not found` } as const;
+							}
+							const repo = await getGitHubRepoInfo(ctx.cwd);
+							if ("error" in repo) {
+								return { error: repo.error } as const;
+							}
+							const issue = await createGitHubIssue(ctx.cwd, freshRecord.title, freshRecord.body, freshRecord.tags);
+							if ("error" in issue) {
+								return { error: issue.error } as const;
+							}
+							// Append issue URL to todo body for tracking
+							const spacer = freshRecord.body.trim().length ? "\n\n" : "";
+							freshRecord.body = `${freshRecord.body.replace(/\s+$/, "")}${spacer}[GitHub issue #${issue.number}](${issue.url})\n`;
+							await writeTodoFile(filePath, freshRecord);
+							return { issue } as const;
+						});
+
+						if (typeof lockResult === "object" && "error" in lockResult) {
+							ctx.ui.notify(lockResult.error, "error");
+							return "stay";
+						}
+
+						ctx.ui.notify(`Created GitHub issue #${lockResult.issue.number}: ${lockResult.issue.url}`, "success");
 						try {
-							copyToClipboard(issue.url);
+							copyToClipboard(lockResult.issue.url);
 						} catch {
 							// ignore clipboard errors
 						}
