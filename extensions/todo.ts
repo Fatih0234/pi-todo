@@ -1316,7 +1316,7 @@ async function createGitHubIssue(
 ): Promise<{ url: string; number: number } | { error: string }> {
 	try {
 		const issueTitle = title.trim() || "Untitled todo";
-		const args = ["issue", "create", "--title", issueTitle, "--json", "url,number"];
+		const args = ["issue", "create", "--title", issueTitle];
 		if (body.trim()) {
 			args.push("--body", body.trim());
 		} else {
@@ -1330,11 +1330,13 @@ async function createGitHubIssue(
 			}
 			return { error: `Failed to create issue: ${stderr || result.stdout || "unknown error"}` };
 		}
-		const parsed = JSON.parse(result.stdout);
-		if (!parsed.url || typeof parsed.number !== "number") {
-			return { error: "Failed to create issue: unexpected response from GitHub CLI." };
+		// gh outputs the issue URL on stdout, e.g. https://github.com/owner/repo/issues/123
+		const url = result.stdout.trim();
+		const match = url.match(/\/issues\/(\d+)$/);
+		if (!match) {
+			return { error: `Created issue but could not parse URL: ${url}` };
 		}
-		return { url: parsed.url, number: parsed.number };
+		return { url, number: parseInt(match[1], 10) };
 	} catch (e) {
 		const msg = e instanceof Error ? e.message : String(e);
 		if (msg.includes("gh not found") || msg.includes("command not found") || msg.includes("not found")) {
