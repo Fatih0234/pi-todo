@@ -13,7 +13,7 @@ A file-based todo manager for [pi](https://pi.dev), with optional **GitHub issue
 ## Install
 
 ```bash
-pi install git:github.com/fatihkarahan/pi-todo
+pi install git:github.com/Fatih0234/pi-todo
 ```
 
 Or copy the extension directly:
